@@ -1,0 +1,600 @@
+---
+title: "PEC2"
+author: "Rubén Jové Nieto"
+date: "8/6/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Enlace al repositorio de github.
+
+https://github.com/rbenjn/PEC_02
+
+## Abstract
+
+A partir de unas muestras de un estudio obtenido del repositorio GTEx (Genotype-Tissue Expression), nos centramos en los datos de expresión (RNA-seq) pertenecientes a un análisis del tiroides. En él, se comparan a 3 tipos distintos de grupo según infiltración, de un total de 292: NIT (téjidos no infiltrados), SFI (pequeñas infiltraciones focales) y ELI (infiltraciones extensas linfoides). Obteniendo una muestra de estudio aleatoria de 30 (10 para cada grupo) se procede a su comparación. Obteniendo  
+
+
+
+```{r 4.1, include=FALSE}
+setwd(".")
+dir.create("data")
+dir.create("results")
+```
+
+## Objetivos
+
+El objetivo de este análisis es comparar y obtener las diferencias significativas resultado de realizar un análisis de expresión diferencia.
+También así poder constatar las posibles diferencias entre los 3 grupos a partir de los datos de expresión.
+
+## Materiales y métodos
+
+Para obtener la muestra de n = 30 de manera aleatoria se realizó un pequeño script mediante R.
+A través de los 2 archivos: 'targets' y 'counts', se construyó la muestra de estudio.
+
+Mediante R y BioConductor se realizó el análisis de datos. Utilizando el paquete DESeq2 para el análisis de los datos de expresión (RNA-seq).
+
+El análisis de significación biológica se hizó mediante el enriquicimiento del conjunto de genes con ClusterProfiler.
+
+Se realizarán 3 comparaciones: 
+-NIT vs SFI 
+-SFI vs ELI
+-ELI vs NIT
+
+### "Pipeline" análisis
+
+Los pasos o "pipeline" seguido para el análisis han sido:
+
+1. Identificar que grupos hay y a qué grupo pertenece cada muestra.
+2. Preprocesado de los datos: filtraje y normalización 
+3. Identificación de genes diferencialmente expresados
+4. Anotación de los resultados
+5. Busca de patrones de expresión y agrupación de las muestras(Comparación entre distintas comparaciones )
+6. Análisis de significación biológica (“Gene Enrichment Analysis”)
+
+### "Pipeline" ampliada
+
+#### 1. Identificar que grupos hay y a qué grupo pertenece cada muestra.
+
+En primer lugar, importamos los 2 distintos archivos: 'targets.csv' y 'counts.csv' a R.  
+
+```{r include=FALSE}
+library(knitr)
+library(readr)
+library(colorspace)
+library(gplots)
+library(ggplot2)
+library(DESeq2)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(hugene21sttranscriptcluster.db)
+library(clusterProfiler)
+library(cluster)
+library(dplyr)
+```
+
+```{r echo=FALSE}
+counts <- read_delim("C:/Users/rubenuoc/Desktop/UOC/MO157/PEC2/archivos targets y counts/counts.csv", 
+                     ";", escape_double = FALSE, trim_ws = TRUE)
+
+
+targets <- read_csv("C:/Users/rubenuoc/Desktop/UOC/MO157/PEC2/archivos targets y counts/targets.csv")
+
+```
+
+A continuación, creamos un script que nos permita extraer 10 muestras de cada grupo (NIT, SFI y ELI). Para ello, utilizamos la información de la columna 'Group' en el archivo 'targets'. Dicho script nos aseguraremos que sea reproducible y aleatorio mediante 'set.seed'. 
+
+```{r}
+set.seed(280520)
+
+targets_10_g <- lapply(split(targets, targets$Grupo_analisis),
+                       function(subdf) subdf[sample(1:nrow(subdf), 10),])
+
+
+targets_10_g <- do.call('rbind', targets_10_g)
+```
+
+Una vez tenemos las filas escogidas, 10 muestras para cada grupo, procedemos a 'cruzar' o 'subsetear' las columnas escogidas en el archivo 'counts.csv'.
+
+```{r}
+df <- counts[, targets_10_g$Sample_Name]
+
+# Para que podamos realizar con mayor falicidad el análisis posterior, cambiaremos el nombre de cada filas: 1, 2, 3, etc por el nombre de la columna X1 del archivo 'counts'.
+
+# Añadimos la columna X1 a nuestro dataframe
+
+df <- cbind(df, X1 = counts$X1)
+
+
+# Cambiamos orden para tenerla primera y poder cambiar el
+
+df <- df[, c(31, 1:30)]
+
+countdata <- df[,-1]
+rownames(countdata) <- df[,1]
+```
+
+Obtenemos entonces, el dataframe 'countdata' con 30 variables, 10 para cada grupo, de manera aleatoria.
+
+Una vez tenemos la dataframe, podemos ya construir el objeto DESeqDataSet.
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = countdata, colData = targets_10_g, design = ~Group)
+
+```
+
+
+#### 2. Preprocesado de los datos: filtraje y normalización 
+
+Procedemos a filtrar los datos ya que nuestro DESeqDataSet tiene filas con 0. Lo hacemos con el fin de reducir el tamaño del 'dds' y así agilizar las funciones. 
+
+```{r}
+nrow(dds)
+
+dds <- dds[ rowSums(counts(dds)) > 1, ]
+nrow(dds)
+```
+Pasando teneer de 56.202 filas a 43.699.
+
+Para poder estabilizar la varianza de los datos, usaremos la función VST (para medios-grandes datasets, n > 30)
+
+```{r}
+vsd <- vst(dds, blind = FALSE) # blind = FALSE para evitar que las variables en el diseño del objeto (Group) interfieran en la varianza media esperada
+head(assay(vsd), 3)
+```
+
+```{r}
+colData(vsd)
+```
+
+También podríamos realizar la transformación con 'rlog', que funciona mejor con muestras pequeñas (n < 30). De hecho así nos lo muestra el mensaje que aparece en la consola, recomendando vst().
+
+```{r}
+rld <- rlog(dds, blind = FALSE)
+head(assay(rld), 3)
+```
+
+Mostramos en plot la comparativa de ambos resultados de transformación de los datos:
+
+```{r}
+dds <- estimateSizeFactors(dds)
+
+df <- bind_rows(
+  as_data_frame(log2(counts(dds, normalized=TRUE)[, 1:2]+1)) %>%
+         mutate(transformation = "log2(x + 1)"),
+  as_data_frame(assay(vsd)[, 1:2]) %>% mutate(transformation = "vst"),
+  as_data_frame(assay(rld)[, 1:2]) %>% mutate(transformation = "rlog"))
+```
+```{r}
+colnames(df)[1:2] <- c("x", "y")  
+
+ggplot(df, aes(x = x, y = y)) + geom_hex(bins = 80) +
+  coord_fixed() + facet_grid( . ~ transformation) 
+```
+
+Utilizando los resultados de VST, es decir el objeto 'vsd' en el análisis, podemos evaluar la similitud general entre muestras. Podemos evaluar si son similares entre ellas o diferentes, así poder hacernos una primera idea si cumple con lo esperado con el análisis. La función 'sampleDists' para calcular las distancias entre las muestras nos ayuda a ello.
+
+```{r}
+sampleDists <- dist(t(assay(vsd)))
+sampleDists
+```
+
+Podemos observar una mayor distancia en muestras de distintos grupos, es decir entre las del grupo 1 NIT  (1.1-1.10) hay una menor distancia, en cambio esta aumenta al compararse con las del grupo 3 ELI por ejemplo.
+
+Lo visualizamos en el siguiente mapa de calor:
+
+```{r}
+library("pheatmap")
+library("RColorBrewer")
+
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste( vsd$dex, vsd$cell, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
+
+Realizamos el gráfico PCA para cada grupo con los datos obtenidos de VST también:
+
+```{r}
+plotPCA(vsd, intgroup = c("Group"))
+```
+Podemos observar cada color para cada grupo y su varianza, surgiendo ciertos patrones similares según grupo. 
+
+
+#### 3. Identificación de genes diferencialmente expresados
+
+Utilizamos la función 'DESeq' en nuestro objeto creado  'dds', para así luego poder de este obtener los resultados que nos interesan a partir de la opción 'contrast', indicando el factor 'Group' que es donde obtenemos los 3 distintos grupos según infiltración tiroídea y las consecuentes comparaciones.
+
+```{r}
+dds <- DESeq(dds, parallel =TRUE)
+```
+
+
+```{r}
+# Realizamos las distintas comparaciones usando 'constrast' para cada grupo, con su respectivo factor: 'Group' en primer lugar, y los 2 grupos a comparar.
+
+res_NIT_vs_ELI <- results(dds, contrast = c("Group", "NIT", "ELI"))
+
+summary(res_NIT_vs_ELI)
+
+res_ELI_vs_SFI <- results(dds, contrast = c("Group", "ELI", "SFI"))
+
+summary(res_ELI_vs_SFI)
+
+res_NIT_vs_SFI <- results(dds, contrast = c("Group", "NIT", "SFI"))
+
+summary(res_NIT_vs_SFI)
+```
+
+Con los datos obtenidos, podemos proceder a extraer aquellos significativos. Teniendo en cuenta un posible 10% de falsos positivos, para cada comparación obtenemos:
+
+```{r}
+sum(res_NIT_vs_ELI$padj < 0.1, na.rm=TRUE)
+
+sum(res_NIT_vs_SFI$padj < 0.1, na.rm=TRUE)
+
+sum(res_ELI_vs_SFI$padj < 0.1, na.rm=TRUE)
+```
+
+NIT vs ELI: 8318 genes significativos
+
+NIT vs SFI: 1608 genes significativos
+
+ELI vs SFI: 3670 genes significativos
+
+Posteriormente podemos identificar aquellos que están down-regulated:
+
+```{r}
+res_NIT_vs_ELI_Sig <- subset(res_NIT_vs_ELI, padj < 0.1)
+
+res_NIT_vs_SFI_Sig <- subset(res_NIT_vs_SFI, padj < 0.1)
+
+res_ELI_vs_SFI_Sig <- subset(res_ELI_vs_SFI, padj < 0.1)
+
+
+head(res_NIT_vs_ELI_Sig[ order(res_NIT_vs_ELI_Sig$log2FoldChange), ])
+
+head(res_NIT_vs_SFI_Sig[ order(res_NIT_vs_SFI_Sig$log2FoldChange), ])
+
+head(res_ELI_vs_SFI_Sig[ order(res_ELI_vs_SFI_Sig$log2FoldChange), ])
+```
+
+Y los que están up-regulated:
+
+```{r}
+head(res_NIT_vs_ELI_Sig[ order(res_NIT_vs_ELI_Sig$log2FoldChange, decreasing = TRUE), ])
+
+head(res_NIT_vs_SFI_Sig[ order(res_NIT_vs_SFI_Sig$log2FoldChange, decreasing = TRUE), ])
+
+head(res_ELI_vs_SFI_Sig[ order(res_ELI_vs_SFI_Sig$log2FoldChange, decreasing = TRUE), ])
+```
+
+
+```{r eval=FALSE, include=FALSE}
+write.csv(exprs(eset_rma), file="./results/normalized.Data.csv")
+write.csv(exprs(eset_filtered), file="./results/normalized.Filtered.Data.csv")
+save(eset_rma, eset_filtered, file="./results/normalized.Data.Rda")
+```
+
+#### 4. Anotación de los resultados
+
+Utilizando la base de datos de Homo Sapiens (org.Hs.eg.db), y teniendo en cuenta el factor ENSEMBL, buscaremos los Entrez ID y el gene symbol obtenidos para cada comparación. Tendremos que quitar los puntos de hay después de cada ENSEMBL en nuestra lista con tal que puedan coincidir con los de la base de datos: 
+
+```{r include=FALSE}
+columns(org.Hs.eg.db)
+```
+
+```{r}
+# Para obtener las keys
+
+tmp=gsub("\\..*","",row.names(res_NIT_vs_ELI)) # borrar '.' de ENSEMBL
+
+# NIT vs ELI
+
+res_NIT_vs_ELI$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_ELI$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_ELI_Ordered <- res_NIT_vs_ELI[order(res_NIT_vs_ELI$pvalue),]
+
+head(res_NIT_vs_ELI_Ordered)
+
+# NIT vs SFI
+
+res_NIT_vs_SFI$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_SFI$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_SFI_Ordered <- res_NIT_vs_SFI[order(res_NIT_vs_SFI$pvalue),]
+
+head(res_NIT_vs_SFI_Ordered)
+
+# ELI vs SFI
+
+res_ELI_vs_SFI$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_ELI_vs_SFI$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_ELI_vs_SFI_Ordered <- res_ELI_vs_SFI[order(res_ELI_vs_SFI$pvalue),]
+
+head(res_ELI_vs_SFI_Ordered)
+
+```
+
+
+```{r include=FALSE}
+# Exportamos los resultados
+
+# NIT_vs_ELI
+
+res_NIT_vs_ELI_Ordered_DF <- as.data.frame(res_NIT_vs_ELI_Ordered)
+
+write.csv(res_NIT_vs_ELI_Ordered, file = "./results/NIT_vs_ELI.csv")
+
+# NIT_vs_SFI
+
+res_NIT_vs_SFI_Ordered_DF <- as.data.frame(res_NIT_vs_SFI_Ordered)
+
+write.csv(res_NIT_vs_SFI_Ordered, file = "./results/NIT_vs_SFI.csv")
+
+# ELI_vs_SFI
+
+res_ELI_vs_SFI_Ordered_DF <- as.data.frame(res_ELI_vs_SFI_Ordered)
+
+write.csv(res_ELI_vs_SFI_Ordered, file = "./results/ELI_vs_SFI.csv")
+
+```
+
+Mediante un volcano plot podemos visualizar dichos genes expresados de manera diferencial:
+
+```{r echo=FALSE}
+geneSymbols <- select(hugene21sttranscriptcluster.db, rownames(fit.main), c("SYMBOL"))
+
+SYMBOLS<- geneSymbols$SYMBOL
+
+volcanoplot(fit.main, coef=1, highlight=4, names=SYMBOLS, 
+            main=paste("Differentially expressed genes", colnames(res_NIT_vs_ELI_Ordered_DF)[1], sep="\n"))
+  abline(v=c(-1,1))
+  
+volcanoplot(fit.main, coef=1, highlight=4, names=SYMBOLS, 
+            main=paste("Differentially expressed genes", colnames(res_NIT_vs_SFI_Ordered_DF)[2], sep="\n"))
+  abline(v=c(-1,1))
+  
+volcanoplot(fit.main, coef=1, highlight=4, names=SYMBOLS, 
+            main=paste("Differentially expressed genes", colnames(res_ELI_vs_SFI_Ordered_DF)[2], sep="\n"))
+  abline(v=c(-1,1))
+```
+
+En el volcano plot mostramos los nombres de los 4 genes expresados de de mayor manera diferencial. Observamos las diferencias entre grupos según el gráfico obtenido. Distinto entre las 2 comparaciones, debido a sus diferencias de grupo. 
+
+#### 8. Comparación entre distintas comparaciones 
+
+Realizamos las múltiples comparaciones:
+
+```{r echo=FALSE}
+res<-limma::decideTests(fit.main, method="separate", adjust.method="fdr", p.value=0.1, lfc=1)
+
+sum.res.rows<-apply(abs(res),1,sum)
+
+res.selected<-res[sum.res.rows!=0,] 
+
+print(summary(res))
+```
+
+
+```{r echo=FALSE}
+vennDiagram (res.selected[,1:2], cex=0.9)
+title("Genes comunes en las 2 comparaciones \n Genes seleccionados con FDR < 0.1 y logFC > 1")
+```
+
+El Diagrama de Venn nos muestra los genes comunes entre las 2 comparaciones. Un total de 822
+
+Los Mapas de Calor como el siguiente permiten visualizar aquellos genes que se expresan de forma diferencial. Los colores que encontramos en la gráfica permite resaltar valores distintos según su expresión. El agrupamiento jerárquico permite encontrar genes con patrones comunes de variación y así asociarlo a los 3 grupos que estamos analizando (N.N, I.S y I.L)
+
+```{r echo=FALSE}
+probesInHeatmap <- rownames(res.selected)
+HMdata <- exprs(eset_filtered)[rownames(exprs(eset_filtered)) %in% probesInHeatmap,]
+
+
+geneSymbols <- select(hugene21sttranscriptcluster.db, rownames(HMdata), c("SYMBOL"))
+SYMBOLS<- geneSymbols$SYMBOL
+rownames(HMdata) <- SYMBOLS
+write.csv(HMdata, file = file.path("./results/data4Heatmap.csv"))
+
+my_palette <- colorRampPalette(c("blue", "red"))(n = 299)
+library(gplots)
+
+heatmap.2(HMdata,
+          Rowv = TRUE,
+          Colv = TRUE,
+          main = "Genes expresados diferencialmente \n FDR < 0,1, logFC >=1",
+          scale = "row",
+          col = my_palette,
+          sepcolor = "white",
+          sepwidth = c(0.05,0.05),
+          cexRow = 0.5,
+          cexCol = 0.9,
+          key = TRUE,
+          keysize = 1.5,
+          density.info = "histogram",
+          ColSideColors = c(rep("green",6),rep("yellow",3), rep("red", 3)),
+          tracecol = NULL,
+          dendrogram = "both",
+          srtCol = 30)
+```
+
+#### 9. Análisis de significación biológica (“Gene Enrichment Analysis”)
+
+Preparamos lista de genes analizados
+
+```{r echo=FALSE}
+
+listOfTables <- list(InflammedvsNormal = topTab_InflammedvsNormal,
+                              I.LvsI.S = topTab_Dolor)
+listOfSelected <- list()
+
+for (i in 1:length(listOfTables)){
+  
+  topTab <- listOfTables[[i]]
+  
+  whichGenes<-topTab["adj.P.Val"]<0.05
+  selectedIDs <- rownames(topTab)[whichGenes]
+  
+  EntrezIDs<- select(hugene21sttranscriptcluster.db, selectedIDs, c("ENTREZID"))
+  EntrezIDs <- EntrezIDs$ENTREZID
+  listOfSelected[[i]] <- EntrezIDs
+  names(listOfSelected)[i] <- names(listOfTables)[i]
+}
+sapply(listOfSelected, length)
+
+```
+
+Los genes a tener en cuenta, tienen al menos una anotación en Gene Ontology.
+
+```{r include=FALSE}
+
+mapped_genes2GO <- mappedkeys(org.Hs.egGO)
+mapped_genes2KEGG <- mappedkeys(org.Hs.egPATH)
+mapped_genes <- union(mapped_genes2GO , mapped_genes2KEGG)
+
+```
+
+Con el paquete "clusterProfiler" y siguiendo el Pathway de ReactomePA, realizamos el análisis de la significación biológica.
+
+```{r include=FALSE}
+
+# The function call of enrichPathway and gsePathway in ReactomePA is consistent with enrichKEGG and gseKEGG.
+
+library(clusterProfiler)
+
+
+listOfData <- listOfSelected[1:2]
+comparisonsNames <- names(listOfData)
+universe <- mapped_genes
+
+for (i in 1:length(listOfData)){
+  genesIn <- listOfData[[i]]
+  comparison <- comparisonsNames[i]
+  enrich.result <- enrichKEGG(gene = genesIn,
+                                 pvalueCutoff = 0.05,
+                                 pAdjustMethod = "BH",
+                                 organism = "human",
+                                 universe = universe)
+  cat("##################################")
+  cat("\nComparison: ", comparison,"\n")
+  print(head(enrich.result))
+  
+  if (length(rownames(enrich.result@result)) != 0) {
+    write.csv(as.data.frame(enrich.result), 
+              file =paste0("./results/","cluster.Results.",comparison,".csv"), 
+              row.names = FALSE)
+    
+    pdf(file=paste0("./results/","clusterBarplot.",comparison,".pdf"))
+    print(barplot(enrich.result, showCategory = 15, font.size = 4, 
+                  title = paste0("Cluster Pathway Analysis for ", comparison,". Barplot")))
+    dev.off()
+    
+    pdf(file = paste0("./results/","clustercnetplot.",comparison,".pdf"))
+    print(cnetplot(enrich.result, categorySize = "geneNum", schowCategory = 15, 
+                   vertex.label.cex = 0.75))
+    dev.off()
+  } 
+}
+
+```
+
+Mostramos para cada comparación, los genes más expresados diferencialmente y con la descripción según su función biológica ("Gene Ontology"):
+
+```{r echo=FALSE}
+tabla_IvsN <- read.csv2("./results/cluster.Results.InflammedvsNormal.csv", header = TRUE, sep = ",") 
+
+knitr::kable(head(tabla_IvsN), booktabs = TRUE, caption = 'Tabla Inflamado vs Normal')
+```
+
+```{r echo=FALSE}
+tabla_Dolor <- read.csv2("./results/cluster.Results.I.LvsI.S.csv", header = TRUE, sep = ",") 
+
+knitr::kable(head(tabla_Dolor), booktabs = TRUE, caption = 'Tabla Dolor')
+```
+
+Los datos al completo los encotramos almacenados en los respectivos archivos .csv para cada comparación. 
+
+```{r echo=FALSE}
+
+cnetplot(enrich.result, categorySize = "geneNum", schowCategory = 15, 
+         vertex.label.cex = 0.75)
+```
+
+
+## Resultados
+
+Obtenemos resultados significativos de ambas comparaciones. 
+
+### Muestra Normal vs Muestra Pulpitis
+
+El Gene Set Enrichment Analysis mostró genes que se expresan de manera diferencial. Con una mayor expresión en la muestra de Pulpitis de genes asociados con la activación de la respuesta inmunitaria. 
+
+```{r echo=FALSE, fig.cap= "Barplot Genes expresados diferencialmente Normal vs Pulpitis"}
+knitr::include_graphics("./results/barplot_IvsN.png")
+```
+
+#### Muestra Dolor Leve vs Dolor Severo
+
+Entre las personas que referían dolor (3 severo y 3 leve), encontramos genes expresados de forma diferencial entre los 2 grupos. Con especial atención a aquellos genes relacionados con el sistema inmune adaptativo y la interacción citoquina-citoquina.
+
+```{r echo=FALSE, fig.cap= "Barplot Genes expresados diferencialmente Dolor Leve vs Dolor Severo"}
+knitr::include_graphics("./results/barplot_ISvsIL.png")
+```
+
+## Discusión
+
+Aunque el uso del análisis de microarrays es una herramienta poderosa para estudiar la expresión simultánea de varios genes, hay algunas limitaciones.
+
+Por ejemplo, factores técnicos como el rango limitado y la hibridización cruzada. Además el perfil celular  de las pulpas inflamadas difiere de las normales. En las inflamadas se caracterizan por tener una afluencia ya por encima de lo normal de células inmunes. 
+
+Es decir, que los resultados pueden ser en parte debido a diferencias en la composición celular. 
+
+## Apéndice
+
+El código R usado en este documento R Markdown:
+
+## Bibliografía
+
+(1) Galicia, J. C., Henson, B. R., Parker, J. S., & Khan, A. A. (2016). Gene expression profile of pulpitis. Genes and immunity, 17(4), 239–243. https://doi.org/10.1038/gene.2016.14
+
+(2) Yu, Guangchuang, and Qing-Yu He. 2016. “ReactomePA: An R/Bioconductor Package for Reactome Pathway Analysis and Visualization.” Molecular BioSystems 12 (2): 477–79. https://doi.org/10.1039/C5MB00663E.
+
+(3) Yu, Guangchuang, Li-Gen Wang, Guang-Rong Yan, and Qing-Yu He. 2015. “DOSE: An R/Bioconductor Package for Disease Ontology Semantic and Enrichment Analysis.” Bioinformatics 31 (4): 608–9. https://doi.org/10.1093/bioinformatics/btu684.
+
+
