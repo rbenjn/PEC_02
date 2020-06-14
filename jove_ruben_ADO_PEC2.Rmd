@@ -1,0 +1,1419 @@
+---
+title: "MO. 157 Análisis de datos ómicos. PEC 2"
+author: "Rubén Jové Nieto"
+date: "14/6/2020"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Enlace al repositorio de github.
+
+https://github.com/rbenjn/PEC_02
+
+## Abstract
+
+A partir de unas muestras de un estudio obtenido del repositorio GTEx (Genotype-Tissue Expression), nos centramos en los datos de expresión (RNA-seq) pertenecientes a un análisis del tiroides. En él, se comparan a 3 tipos distintos de grupo según infiltración, de un total de 292: NIT (téjidos no infiltrados), SFI (pequeñas infiltraciones focales) y ELI (infiltraciones extensas linfoides). Obteniendo una muestra de estudio aleatoria de 30 (10 para cada grupo) se procede a su comparación. Obteniendo  
+
+
+
+```{r 4.1, include=FALSE}
+setwd(".")
+dir.create("data")
+dir.create("results")
+```
+
+## Objetivos
+
+El objetivo de este análisis es comparar y obtener las diferencias significativas resultado de realizar un análisis de expresión diferencia.
+También así poder constatar las posibles diferencias entre los 3 grupos a partir de los datos de expresión.
+
+## Materiales y métodos
+
+Para obtener la muestra de n = 30 de manera aleatoria se realizó un pequeño script mediante R.
+A través de los 2 archivos: 'targets' y 'counts', se construyó la muestra de estudio.
+
+Mediante R y BioConductor se realizó el análisis de datos. Utilizando el paquete DESeq2 para el análisis de los datos de expresión (RNA-seq).
+
+El análisis de significación biológica se hizó mediante el enriquicimiento del conjunto de genes con ClusterProfiler.
+
+Se realizarán 3 comparaciones: 
+-NIT vs SFI 
+-SFI vs ELI
+-ELI vs NIT
+
+### "Pipeline" análisis
+
+Los pasos o "pipeline" seguido para el análisis han sido:
+
+1. Identificar que grupos hay y a qué grupo pertenece cada muestra.
+2. Preprocesado de los datos: filtraje y normalización 
+3. Identificación de genes diferencialmente expresados
+4. Anotación de los resultados
+5. Busca de patrones de expresión y agrupación de las muestras(Comparación entre distintas comparaciones )
+6. Análisis de significación biológica (“Gene Enrichment Analysis”)
+
+### "Pipeline" ampliada
+
+#### 1. Identificar que grupos hay y a qué grupo pertenece cada muestra.
+
+En primer lugar, importamos los 2 distintos archivos: 'targets.csv' y 'counts.csv' a R.  
+
+```{r include=FALSE}
+library(knitr)
+library(readr)
+library(colorspace)
+library(gplots)
+library(ggplot2)
+library(DESeq2)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(hugene21sttranscriptcluster.db)
+library(clusterProfiler)
+library(dplyr)
+library(limma)
+library(hexbin)
+library(pheatmap)
+library(RColorBrewer)
+```
+
+```{r include=FALSE}
+counts <- read_delim("C:/Users/rubenuoc/Desktop/UOC/MO157/PEC2/PEC_02/data/counts.csv", 
+                     ";", escape_double = FALSE, trim_ws = TRUE)
+
+
+targets <- read_csv("C:/Users/rubenuoc/Desktop/UOC/MO157/PEC2/PEC_02/data/targets.csv")
+
+```
+
+A continuación, creamos un script que nos permita extraer 10 muestras de cada grupo (NIT, SFI y ELI). Para ello, utilizamos la información de la columna 'Group' en el archivo 'targets'. Dicho script nos aseguraremos que sea reproducible y aleatorio mediante 'set.seed'. 
+
+```{r include=FALSE}
+set.seed(280520)
+
+targets_10_g <- lapply(split(targets, targets$Grupo_analisis),
+                       function(subdf) subdf[sample(1:nrow(subdf), 10),])
+
+
+targets_10_g <- do.call('rbind', targets_10_g)
+
+```
+Así quedaría el dataframe con las muestras escogidas.
+
+```{r echo=FALSE}
+head(targets_10_g)
+```
+
+Una vez tenemos las filas escogidas, 10 muestras para cada grupo, procedemos a 'cruzar' o 'subsetear' las columnas escogidas en el archivo 'counts.csv'.
+
+```{r include=FALSE}
+df <- counts[, targets_10_g$Sample_Name]
+
+# Para que podamos realizar con mayor falicidad el análisis posterior, cambiaremos el nombre de cada filas: 1, 2, 3, etc por el nombre de la columna X1 del archivo 'counts'.
+
+# Añadimos la columna X1 a nuestro dataframe
+
+df <- cbind(df, X1 = counts$X1)
+
+
+# Cambiamos orden para tenerla primera y poder cambiar el
+
+df <- df[, c(31, 1:30)]
+
+countdata <- df[,-1]
+rownames(countdata) <- df[,1]
+```
+
+Obtenemos entonces, el dataframe 'countdata' con 30 variables, 10 para cada grupo, de manera aleatoria.
+
+Una vez tenemos la dataframe, podemos ya construir el objeto DESeqDataSet.
+
+```{r include=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = countdata, colData = targets_10_g, design = ~Group)
+
+```
+
+
+#### 2. Preprocesado de los datos: filtraje y normalización 
+
+Procedemos a filtrar los datos ya que nuestro DESeqDataSet tiene filas con 0. Lo hacemos con el fin de reducir el tamaño del 'dds' y así agilizar las funciones. 
+
+```{r echo=FALSE}
+nrow(dds)
+
+dds <- dds[ rowSums(counts(dds)) > 1, ]
+nrow(dds)
+```
+
+Pasando tener de 56.202 filas a 43.699.
+
+Para poder estabilizar la varianza de los datos, usaremos la función VST (para medios-grandes datasets, n > 30)
+
+```{r echo=FALSE}
+vsd <- vst(dds, blind = FALSE) # blind = FALSE para evitar que las variables en el diseño del objeto (Group) interfieran en la varianza media esperada
+head(assay(vsd), 3)
+```
+
+```{r echo=FALSE}
+colData(vsd)
+```
+
+También podríamos realizar la transformación con 'rlog', que funciona mejor con muestras pequeñas (n < 30). De hecho así nos lo muestra el mensaje que aparece en la consola, recomendando vst().
+
+```{r echo=FALSE}
+rld <- rlog(dds, blind = FALSE)
+head(assay(rld), 3)
+```
+
+Mostramos en plot la comparativa de ambos resultados de transformación de los datos:
+
+```{r include=FALSE}
+dds <- estimateSizeFactors(dds)
+
+df <- bind_rows(
+  as_data_frame(log2(counts(dds, normalized=TRUE)[, 1:2]+1)) %>%
+         mutate(transformation = "log2(x + 1)"),
+  as_data_frame(assay(vsd)[, 1:2]) %>% mutate(transformation = "vst"),
+  as_data_frame(assay(rld)[, 1:2]) %>% mutate(transformation = "rlog"))
+```
+
+```{r echo=FALSE}
+colnames(df)[1:2] <- c("x", "y")  
+
+ggplot(df, aes(x = x, y = y)) + geom_hex(bins = 80) +
+  coord_fixed() + facet_grid( . ~ transformation) 
+```
+
+Utilizando los resultados de VST, es decir el objeto 'vsd' en el análisis, podemos evaluar la similitud general entre muestras. Podemos evaluar si son similares entre ellas o diferentes, así poder hacernos una primera idea si cumple con lo esperado con el análisis. La función 'sampleDists' para calcular las distancias entre las muestras nos ayuda a ello.
+
+```{r include=FALSE}
+sampleDists <- dist(t(assay(vsd)))
+sampleDists
+```
+
+Podemos observar una mayor distancia en muestras de distintos grupos, es decir entre las del grupo 1 NIT  (1.1-1.10) hay una menor distancia, en cambio esta aumenta al compararse con las del grupo 3 ELI por ejemplo.
+
+Lo visualizamos en el siguiente mapa de calor:
+
+```{r echo=FALSE}
+
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste( vsd$dex, vsd$cell, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
+
+Realizamos el gráfico PCA para cada grupo con los datos obtenidos de VST también:
+
+```{r echo=FALSE}
+plotPCA(vsd, intgroup = c("Group"))
+```
+Podemos observar cada color para cada grupo y su varianza, surgiendo ciertos patrones similares según grupo. 
+
+
+#### 3. Identificación de genes diferencialmente expresados
+
+Utilizamos la función 'DESeq' en nuestro objeto creado  'dds', para así luego poder de este obtener los resultados que nos interesan a partir de la opción 'contrast', indicando el factor 'Group' que es donde obtenemos los 3 distintos grupos según infiltración tiroídea y las consecuentes comparaciones.
+
+Mostraremos un resumen de los resultados para cada comparación. 
+
+```{r include=FALSE}
+dds <- DESeq(dds)
+```
+
+
+#### NIT vs ELI
+
+```{r echo=FALSE}
+# Realizamos las distintas comparaciones usando 'constrast' para cada grupo, con su respectivo factor: 'Group' en primer lugar, y los 2 grupos a comparar.
+
+# NIT vs ELI
+
+res_NIT_vs_ELI <- results(dds, contrast = c("Group", "NIT", "ELI"))
+
+NIT_vs_ELI_rownames <- row.names(res_NIT_vs_ELI)
+
+summary(res_NIT_vs_ELI)
+
+```
+
+#### NIT vs SFI
+
+```{r echo=FALSE}
+# NIT vs SFI
+
+res_NIT_vs_SFI <- results(dds, contrast = c("Group", "NIT", "SFI"))
+
+NIT_vs_SFI_rownames <- row.names(res_NIT_vs_SFI)
+
+summary(res_NIT_vs_SFI)
+```
+#### ELI vs SFI
+
+```{r echo=FALSE}
+# ELI vs SFI
+
+res_ELI_vs_SFI <- results(dds, contrast = c("Group", "ELI", "SFI"))
+
+ELI_vs_SFI_rownames <- row.names(res_ELI_vs_SFI)
+
+summary(res_ELI_vs_SFI)
+```
+
+Con los datos obtenidos, podemos proceder a extraer y aquellos significativos. Teniendo en cuenta un posible 10% de falsos positivos, para cada comparación obtenemos:
+
+```{r include=FALSE}
+sum(res_NIT_vs_ELI$padj < 0.1, na.rm=TRUE)
+
+sum(res_NIT_vs_SFI$padj < 0.1, na.rm=TRUE)
+
+sum(res_ELI_vs_SFI$padj < 0.1, na.rm=TRUE)
+```
+
+NIT vs ELI: 8318 genes significativos
+
+NIT vs SFI: 1608 genes significativos
+
+ELI vs SFI: 3670 genes significativos
+
+
+```{r include=FALSE}
+res_NIT_vs_ELI_Sig <- subset(res_NIT_vs_ELI, padj < 0.1)
+
+res_NIT_vs_SFI_Sig <- subset(res_NIT_vs_SFI, padj < 0.1)
+
+res_ELI_vs_SFI_Sig <- subset(res_ELI_vs_SFI, padj < 0.1)
+```
+
+Posteriormente podemos  identificar y mostrar aquellos que están down-regulated para cada comparación:
+
+```{r echo=FALSE}
+head(res_NIT_vs_ELI_Sig[ order(res_NIT_vs_ELI_Sig$log2FoldChange), ])
+
+head(res_NIT_vs_SFI_Sig[ order(res_NIT_vs_SFI_Sig$log2FoldChange), ])
+
+head(res_ELI_vs_SFI_Sig[ order(res_ELI_vs_SFI_Sig$log2FoldChange), ])
+```
+
+Y los que están up-regulated para cada comparación:
+
+```{r echo=FALSE}
+head(res_NIT_vs_ELI_Sig[ order(res_NIT_vs_ELI_Sig$log2FoldChange, decreasing = TRUE), ])
+
+head(res_NIT_vs_SFI_Sig[ order(res_NIT_vs_SFI_Sig$log2FoldChange, decreasing = TRUE), ])
+
+head(res_ELI_vs_SFI_Sig[ order(res_ELI_vs_SFI_Sig$log2FoldChange, decreasing = TRUE), ])
+```
+
+
+
+#### 4. Anotación de los resultados
+
+Utilizando la base de datos de Homo Sapiens (org.Hs.eg.db), y teniendo en cuenta el factor ENSEMBL, buscaremos los Entrez ID y el gene symbol obtenidos para cada comparación. Tendremos que quitar los puntos de hay después de cada ENSEMBL en nuestra lista con tal que puedan coincidir con los de la base de datos: 
+
+```{r include=FALSE}
+columns(org.Hs.eg.db)
+```
+
+#### Para los datos significativos
+
+```{r echo=FALSE}
+# NIT vs ELI Sig
+
+tmp_NIT_vs_ELI_Sig=gsub("\\..*","",row.names(res_NIT_vs_ELI_Sig)) # borrar '.' de ENSEMBL
+
+res_NIT_vs_ELI_Sig$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_ELI_Sig,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_ELI_Sig$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_ELI_Sig,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_ELI_Sig_Ordered <- res_NIT_vs_ELI_Sig[order(res_NIT_vs_ELI_Sig$pvalue),]
+
+head(res_NIT_vs_ELI_Sig_Ordered)
+
+# NIT vs SFI Sig
+
+tmp_NIT_vs_SFI_Sig=gsub("\\..*","",row.names(res_NIT_vs_SFI_Sig)) # borrar '.' de ENSEMBL
+
+res_NIT_vs_SFI_Sig$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_SFI_Sig,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_SFI_Sig$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_SFI_Sig,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_SFI_Sig_Ordered <- res_NIT_vs_SFI_Sig[order(res_NIT_vs_SFI_Sig$pvalue),]
+
+head(res_NIT_vs_SFI_Sig_Ordered)
+
+# ELI vs SFI Sig
+
+tmp_ELI_vs_SFI_Sig=gsub("\\..*","",row.names(res_ELI_vs_SFI_Sig)) # borrar '.' de ENSEMBL
+
+res_ELI_vs_SFI_Sig$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_ELI_vs_SFI_Sig,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_ELI_vs_SFI_Sig$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_ELI_vs_SFI_Sig,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_ELI_vs_SFI_Sig_Ordered <- res_ELI_vs_SFI_Sig[order(res_ELI_vs_SFI_Sig$pvalue),]
+
+head(res_ELI_vs_SFI_Sig_Ordered)
+```
+
+#### No significativos
+
+```{r echo=FALSE}
+# Para obtener las keys
+
+# NIT vs ELI
+
+tmp_NIT_vs_ELI=gsub("\\..*","",row.names(res_NIT_vs_ELI)) # borrar '.' de ENSEMBL
+
+res_NIT_vs_ELI$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_ELI,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_ELI$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_ELI,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_ELI_Ordered <- res_NIT_vs_ELI[order(res_NIT_vs_ELI$pvalue),]
+
+head(res_NIT_vs_ELI_Ordered)
+
+# NIT vs SFI
+
+res_NIT_vs_SFI_DF <- as.data.frame(res_NIT_vs_SFI)
+
+tmp_NIT_vs_SFI=gsub("\\..*","",row.names(res_NIT_vs_SFI)) # borrar '.' de ENSEMBL
+
+res_NIT_vs_SFI$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_SFI,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_SFI$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_SFI,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_SFI_Ordered <- res_NIT_vs_SFI[order(res_NIT_vs_SFI$pvalue),]
+
+head(res_NIT_vs_SFI_Ordered)
+
+# ELI vs SFI
+
+res_ELI_vs_SFI_DF <- as.data.frame(res_ELI_vs_SFI)
+
+tmp_ELI_vs_SFI=gsub("\\..*","",row.names(res_ELI_vs_SFI_DF)) # borrar '.' de ENSEMBL
+
+res_ELI_vs_SFI$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_ELI_vs_SFI,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_ELI_vs_SFI$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_ELI_vs_SFI,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_ELI_vs_SFI_Ordered <- res_ELI_vs_SFI[order(res_ELI_vs_SFI$pvalue),]
+
+head(res_ELI_vs_SFI_Ordered)
+
+```
+
+
+```{r Significativos, include=FALSE}
+# Exportamos los resultados significativos
+
+# NIT_vs_ELI
+
+res_NIT_vs_ELI_Sig_Ordered_DF <- as.data.frame(res_NIT_vs_ELI_Sig_Ordered)
+
+write.csv(res_NIT_vs_ELI_Sig_Ordered, file = "./results/NIT_vs_ELI_Sig.csv")
+
+# NIT_vs_SFI
+
+res_NIT_vs_SFI_Sig_Ordered_DF <- as.data.frame(res_NIT_vs_SFI_Sig_Ordered)
+
+write.csv(res_NIT_vs_SFI_Sig_Ordered, file = "./results/NIT_vs_SFI_Sig.csv")
+
+# ELI_vs_SFI
+
+res_ELI_vs_SFI_Sig_Ordered_DF <- as.data.frame(res_ELI_vs_SFI_Sig_Ordered)
+
+write.csv(res_ELI_vs_SFI_Sig_Ordered, file = "./results/ELI_vs_SFI_Sig.csv")
+```
+
+
+```{r include=FALSE}
+# Exportamos los resultados
+
+# NIT_vs_ELI
+
+res_NIT_vs_ELI_Ordered_DF <- as.data.frame(res_NIT_vs_ELI_Ordered)
+
+write.csv(res_NIT_vs_ELI_Ordered, file = "./results/NIT_vs_ELI.csv")
+
+# NIT_vs_SFI
+
+res_NIT_vs_SFI_Ordered_DF <- as.data.frame(res_NIT_vs_SFI_Ordered)
+
+write.csv(res_NIT_vs_SFI_Ordered, file = "./results/NIT_vs_SFI.csv")
+
+# ELI_vs_SFI
+
+res_ELI_vs_SFI_Ordered_DF <- as.data.frame(res_ELI_vs_SFI_Ordered)
+
+write.csv(res_ELI_vs_SFI_Ordered, file = "./results/ELI_vs_SFI.csv")
+
+```
+
+#### 5. Busca de patrones de expresión y agrupación de las muestras(Comparación entre distintas comparaciones )
+
+
+Realizamos las múltiples comparaciones. Utilizaremos para ello y hacerlo de manera visual, un Diagrama de Venn, adaptando los datos para su análisis y comparar las 3 comparaciones. Se podrá así ver patrones de expresión y agrupaciones de la muestra. 
+
+
+```{r echo=FALSE}
+# Combinamos las 3 comparaciones para el posterior Diagrama de Venn
+
+comb <- c(rownames(res_NIT_vs_ELI_Sig_Ordered_DF), rownames(res_NIT_vs_ELI_Sig_Ordered_DF), rownames(res_ELI_vs_SFI_Sig_Ordered_DF))
+
+res_NIT_vs_ELI_venn <- comb %in% rownames(res_NIT_vs_ELI_Sig_Ordered_DF)
+res_NIT_vs_SFI_venn <- comb %in% rownames(res_NIT_vs_ELI_Sig_Ordered_DF)  
+res_ELI_vs_SFI_venn <- comb %in% rownames(res_ELI_vs_SFI_Sig_Ordered_DF)
+
+counts_venn <- cbind(res_NIT_vs_ELI_venn, res_NIT_vs_SFI_venn, res_ELI_vs_SFI_venn)
+
+results_venn <- vennCounts(counts_venn)
+
+vennDiagram (results_venn, cex=1, names = c("NIT vs ELI", "NIT vs SFI", "ELI vs SFI"), circle.col = c("red", "blue", "yellow"))
+
+title("Genes en común en las 3 comparaciones")
+```
+
+El Diagrama de Venn nos muestra los genes comunes entre las 3 comparaciones. Un total de 8301
+
+#### 6. Análisis de significación biológica (“Gene Enrichment Analysis”)
+
+Utilizamos el paquete 'ClusterProfiler' para el análisis de significación biológica. Lo haremos desde 2 perspectivas: por un lado con el workflow de la referencia (3) de Guangchuang Yu. Y por otro lado, con el pathway de ReactomePA adaptado a ClusterProfiler. 
+
+#### ClusterProfiler según referencia (3)
+
+#### NIT vs ELI
+
+```{r echo=FALSE}
+# Con el paquete 'ClusterProfiler'
+
+tmp_NIT_vs_ELI=gsub("\\..*","",row.names(res_NIT_vs_ELI_Ordered_DF)) # borrar '.' de ENSEMBL
+
+ego_NIT_vs_ELI <- enrichGO(gene         = res_NIT_vs_ELI_Ordered_DF$entrez,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENTREZID',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_NIT_vs_ELI))
+
+dotplot(ego_NIT_vs_ELI, showCategory = 15)
+```
+
+#### NIT vs ELI con los datos significativos
+
+```{r echo=FALSE}
+ego_NIT_vs_ELI_Sig <- enrichGO(gene         = res_NIT_vs_ELI_Sig_Ordered_DF$entrez,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENTREZID',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_NIT_vs_ELI_Sig))
+
+dotplot(ego_NIT_vs_ELI_Sig, showCategory = 15)
+```
+
+
+
+#### NIT vs SFI
+
+```{r echo=FALSE}
+tmp_NIT_vs_SFI=gsub("\\..*","",row.names(res_NIT_vs_SFI_Ordered_DF)) # borrar '.' de ENSEMBL
+
+ego_NIT_vs_SFI <- enrichGO(gene         = res_NIT_vs_SFI_Ordered_DF$entrez,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENTREZID',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_NIT_vs_SFI))
+
+dotplot(ego_NIT_vs_SFI, showCategory = 15)
+```
+
+#### NIT vs SFI con los datos significativos
+
+```{r echo=FALSE}
+ego_NIT_vs_SFI_Sig <- enrichGO(gene         = res_NIT_vs_SFI_Sig_Ordered_DF$entrez,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENTREZID',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_NIT_vs_SFI_Sig))
+
+dotplot(ego_NIT_vs_SFI_Sig, showCategory = 15)
+```
+
+
+#### ELI vs SFI
+
+```{r echo=FALSE}
+# En este caso utilizaremos como keyType 'ENSEMBL' en lugar de ENTREZID, para ver si hay diferencias.
+
+tmp_ELI_vs_SFI=gsub("\\..*","",row.names(res_ELI_vs_SFI_Ordered_DF)) # borrar '.' de ENSEMBL
+
+ego_ELI_vs_SFI <- enrichGO(gene         = tmp_ELI_vs_SFI,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENSEMBL',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_ELI_vs_SFI))
+
+dotplot(ego_ELI_vs_SFI, showCategory = 15)
+```
+
+#### ELI vs SFI con los datos significativos
+
+```{r echo=FALSE}
+tmp_ELI_vs_SFI_Sig=gsub("\\..*","",row.names(res_ELI_vs_SFI_Sig_Ordered_DF)) # borrar '.' de ENSEMBL
+
+ego_ELI_vs_SFI_Sig <- enrichGO(gene         = tmp_ELI_vs_SFI_Sig,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENSEMBL',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_ELI_vs_SFI_Sig))
+
+dotplot(ego_ELI_vs_SFI_Sig, showCategory = 15)
+```
+
+#### Pathway de ReactomePA con ClusterProfiler
+
+Preparamos lista de genes analizados
+
+```{r echo=FALSE}
+
+listOfTables <- list(NIT_vs_ELI = res_NIT_vs_ELI_Sig_Ordered_DF,                    NIT_vs_SFI = res_NIT_vs_SFI_Sig_Ordered_DF, ELI_vs_SFI = res_ELI_vs_SFI_Sig_Ordered_DF)
+
+listOfSelected <- list()
+
+for (i in 1:length(listOfTables)){
+  
+  topTab <- listOfTables[[i]]
+  
+  whichGenes<-topTab$padj<0.1
+  selectedIDs <- gsub("\\..*","",row.names(topTab)[whichGenes])
+  EntrezIDs <- topTab$entrez
+  listOfSelected[[i]] <- EntrezIDs
+  names(listOfSelected)[i] <- names(listOfTables)[i]
+}
+
+sapply(listOfSelected, length)
+
+```
+
+Los genes a tener en cuenta, tienen al menos una anotación en Gene Ontology.
+
+```{r include=FALSE}
+
+mapped_genes2GO <- mappedkeys(org.Hs.egGO)
+mapped_genes2KEGG <- mappedkeys(org.Hs.egPATH)
+mapped_genes <- union(mapped_genes2GO , mapped_genes2KEGG)
+
+```
+
+Con el paquete "clusterProfiler" y siguiendo el Pathway de ReactomePA, realizamos el análisis de la significación biológica.
+
+```{r echo=FALSE}
+
+library(clusterProfiler)
+
+
+listOfData <- listOfSelected[1:3]
+comparisonsNames <- names(listOfData)
+universe <- mapped_genes
+
+for (i in 1:length(listOfData)){
+  genesIn <- listOfData[[i]]
+  comparison <- comparisonsNames[i]
+  enrich.result <- enrichKEGG(gene = genesIn,
+                                 pvalueCutoff = 0.10,
+                                 pAdjustMethod = "BH",
+                                 organism = "human",
+                                 universe = universe)
+  cat("##################################")
+  cat("\nComparison: ", comparison,"\n")
+  print(head(enrich.result))
+  
+  if (length(rownames(enrich.result@result)) != 0) {
+    write.csv(as.data.frame(enrich.result), 
+              file =paste0("./results/","cluster.Results.",comparison,".csv"), 
+              row.names = FALSE)
+    
+    pdf(file=paste0("./results/","clusterBarplot.",comparison,".pdf"))
+    print(barplot(enrich.result, showCategory = 15, font.size = 4, 
+                  title = paste0("Cluster Pathway Analysis for ", comparison,". Barplot")))
+    dev.off()
+    
+    pdf(file = paste0("./results/","clustercnetplot.",comparison,".pdf"))
+    print(cnetplot(enrich.result, categorySize = "geneNum", schowCategory = 15, 
+                   vertex.label.cex = 0.75))
+    dev.off()
+  } 
+}
+
+```
+
+Mostramos para cada comparación, los genes más expresados diferencialmente y con la descripción según su función biológica ("Gene Ontology"):
+
+#### NIT vs ELI
+
+```{r echo=FALSE}
+tabla_NIT_vs_ELI <- read.csv2("./results/cluster.Results.NIT_vs_ELI.csv", header = TRUE, sep = ",") 
+
+knitr::kable(head(tabla_NIT_vs_ELI), booktabs = TRUE, caption = 'Tabla NIT_vs_ELI')
+```
+
+#### NIT vs SFI
+
+```{r echo=FALSE}
+tabla_NIT_vs_SFI <- read.csv2("./results/cluster.Results.NIT_vs_SFI.csv", header = TRUE, sep = ",") 
+
+knitr::kable(head(tabla_NIT_vs_SFI), booktabs = TRUE, caption = 'Tabla NIT_vs_SFI')
+```
+
+#### NIT vs ELI
+
+```{r echo=FALSE}
+tabla_ELI_vs_SFI <- read.csv2("./results/cluster.Results.ELI_vs_SFI.csv", header = TRUE, sep = ",") 
+
+knitr::kable(head(tabla_ELI_vs_SFI), booktabs = TRUE, caption = 'Tabla ELI_vs_SFI')
+```
+
+Los datos al completo los encotramos almacenados en los respectivos archivos .csv para cada comparación. 
+
+## Resultados
+
+Obtenemos resultados significativos al realizar el análisis con ambos procedimientos y según la comparación entre grupos. 
+
+El Gene Set Enrichment Analysis mostró genes que se expresan de manera diferencial según grupo y comparación. 
+
+### Grupo NIT vs Grupo ELI
+
+Es la comparación donde encontramos una mayor expresión diferencial. Posiblemente debido al origen distinto de los grupos: NIT (tejidos no infiltrados) vs ELI (infiltraciones extensas). Están mayormente expresados de manera diferencial genes relacionados con el ciclo celular y el rechazo a producido ante un translpante o infiltración como en este caso (Allograft rejection). También hay una expresión diferencial para genes relacionados con patologías y enfermades como Parkinson, Alzheimer o Miocarditis.
+
+```{r echo=FALSE}
+knitr::include_graphics("./results/barplot_NIT_vs_ELI.png")
+
+knitr::include_graphics("./results/cnetplot_NIT_vs_ELI.png")
+
+```
+
+### Grupo NIT vs Grupo SFI
+
+Entre el grupo NIT y SFI encontramos genes expresados de forma diferencial. Con especial atención a aquellos genes relacionados con el sistema inmune y su respuesta humoral.  
+
+```{r echo=FALSE}
+knitr::include_graphics("./results/barplot_NIT_vs_SFI.png")
+
+knitr::include_graphics("./results/cnetplot_NIT_vs_SFI.png")
+
+```
+
+### Grupo ELI vs Grupo SFI
+
+Finalmente, entre el grupo ELI y SFI encontramos diferencias a nivel de respuesta inmune y proceso inflamatorio, aunque no tantas como en los casos anteriores donde comparábamos téjido no infiltrado con distintos téjidos sí infiltrados (ELI y SFI). 
+
+```{r echo=FALSE}
+knitr::include_graphics("./results/barplot_ELI_vs_SFI.png")
+
+knitr::include_graphics("./results/cnetplot_ELI_vs_SFI.png")
+
+```
+
+## Discusión
+
+El análisis de los datos de expresión de RNA es una herramienta útil y poderosa. 
+
+Mediante el análisis con R y los paquetes de BioConductor, se puede obtener y realizar distintos procesos. Desde el filtraje de los datos, transformación de estos, visualización en gráficos y su significación biológica, entre otras. Permitiendo realizar un completo análisis de los datos. 
+
+No obstante, hay algunas limitaciones vistas durante este análisis.
+
+Por ejemplo, factores técnicos como el elevado NA en el mapeado al realizar la anotación aunque no ha sido un impedimento para el proceso. También el conteo bajo en algunos genes.
+
+De todas maneras, el análisis se puede concluir como positivo. Ayudando a confirmar hipótesis iniciales acerca de qué diferencias de expresión se pueden encontrar en distintos téjidos según infiltración tiroidea y que genes tiene expresados. 
+
+## Apéndice
+
+El código R usado en este documento R Markdown:
+
+```{r eval=FALSE}
+## ----setup, include=FALSE---------------------
+knitr::opts_chunk$set(echo = TRUE)
+
+
+## ----4.1, include=FALSE-----------------------
+setwd(".")
+dir.create("data")
+dir.create("results")
+
+
+## ----include=FALSE----------------------------
+library(knitr)
+library(readr)
+library(colorspace)
+library(gplots)
+library(ggplot2)
+library(DESeq2)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(hugene21sttranscriptcluster.db)
+library(clusterProfiler)
+library(dplyr)
+library(limma)
+library(hexbin)
+library(pheatmap)
+library(RColorBrewer)
+
+
+## ----include=FALSE----------------------------
+counts <- read_delim("C:/Users/rubenuoc/Desktop/UOC/MO157/PEC2/PEC_02/data/counts.csv", 
+                     ";", escape_double = FALSE, trim_ws = TRUE)
+
+
+targets <- read_csv("C:/Users/rubenuoc/Desktop/UOC/MO157/PEC2/PEC_02/data/targets.csv")
+
+
+
+## ----include=FALSE----------------------------
+set.seed(280520)
+
+targets_10_g <- lapply(split(targets, targets$Grupo_analisis),
+                       function(subdf) subdf[sample(1:nrow(subdf), 10),])
+
+
+targets_10_g <- do.call('rbind', targets_10_g)
+
+
+
+## ----echo=FALSE-------------------------------
+head(targets_10_g)
+
+
+## ----include=FALSE----------------------------
+df <- counts[, targets_10_g$Sample_Name]
+
+# Para que podamos realizar con mayor falicidad el análisis posterior, cambiaremos el nombre de cada filas: 1, 2, 3, etc por el nombre de la columna X1 del archivo 'counts'.
+
+# Añadimos la columna X1 a nuestro dataframe
+
+df <- cbind(df, X1 = counts$X1)
+
+
+# Cambiamos orden para tenerla primera y poder cambiar el
+
+df <- df[, c(31, 1:30)]
+
+countdata <- df[,-1]
+rownames(countdata) <- df[,1]
+
+
+## ----include=FALSE----------------------------
+dds <- DESeqDataSetFromMatrix(countData = countdata, colData = targets_10_g, design = ~Group)
+
+
+
+## ----echo=FALSE-------------------------------
+nrow(dds)
+
+dds <- dds[ rowSums(counts(dds)) > 1, ]
+nrow(dds)
+
+
+## ----echo=FALSE-------------------------------
+vsd <- vst(dds, blind = FALSE) # blind = FALSE para evitar que las variables en el diseño del objeto (Group) interfieran en la varianza media esperada
+head(assay(vsd), 3)
+
+
+## ----echo=FALSE-------------------------------
+colData(vsd)
+
+
+## ----echo=FALSE-------------------------------
+rld <- rlog(dds, blind = FALSE)
+head(assay(rld), 3)
+
+
+## ----include=FALSE----------------------------
+dds <- estimateSizeFactors(dds)
+
+df <- bind_rows(
+  as_data_frame(log2(counts(dds, normalized=TRUE)[, 1:2]+1)) %>%
+         mutate(transformation = "log2(x + 1)"),
+  as_data_frame(assay(vsd)[, 1:2]) %>% mutate(transformation = "vst"),
+  as_data_frame(assay(rld)[, 1:2]) %>% mutate(transformation = "rlog"))
+
+
+## ----echo=FALSE-------------------------------
+colnames(df)[1:2] <- c("x", "y")  
+
+ggplot(df, aes(x = x, y = y)) + geom_hex(bins = 80) +
+  coord_fixed() + facet_grid( . ~ transformation) 
+
+
+## ----include=FALSE----------------------------
+sampleDists <- dist(t(assay(vsd)))
+sampleDists
+
+
+## ----echo=FALSE-------------------------------
+
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste( vsd$dex, vsd$cell, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+
+
+## ----echo=FALSE-------------------------------
+plotPCA(vsd, intgroup = c("Group"))
+
+
+## ----include=FALSE----------------------------
+dds <- DESeq(dds)
+
+
+## ----echo=FALSE-------------------------------
+# Realizamos las distintas comparaciones usando 'constrast' para cada grupo, con su respectivo factor: 'Group' en primer lugar, y los 2 grupos a comparar.
+
+# NIT vs ELI
+
+res_NIT_vs_ELI <- results(dds, contrast = c("Group", "NIT", "ELI"))
+
+NIT_vs_ELI_rownames <- row.names(res_NIT_vs_ELI)
+
+summary(res_NIT_vs_ELI)
+
+
+
+## ----echo=FALSE-------------------------------
+# NIT vs SFI
+
+res_NIT_vs_SFI <- results(dds, contrast = c("Group", "NIT", "SFI"))
+
+NIT_vs_SFI_rownames <- row.names(res_NIT_vs_SFI)
+
+summary(res_NIT_vs_SFI)
+
+
+## ----echo=FALSE-------------------------------
+# ELI vs SFI
+
+res_ELI_vs_SFI <- results(dds, contrast = c("Group", "ELI", "SFI"))
+
+ELI_vs_SFI_rownames <- row.names(res_ELI_vs_SFI)
+
+summary(res_ELI_vs_SFI)
+
+
+## ----include=FALSE----------------------------
+sum(res_NIT_vs_ELI$padj < 0.1, na.rm=TRUE)
+
+sum(res_NIT_vs_SFI$padj < 0.1, na.rm=TRUE)
+
+sum(res_ELI_vs_SFI$padj < 0.1, na.rm=TRUE)
+
+
+## ----include=FALSE----------------------------
+res_NIT_vs_ELI_Sig <- subset(res_NIT_vs_ELI, padj < 0.1)
+
+res_NIT_vs_SFI_Sig <- subset(res_NIT_vs_SFI, padj < 0.1)
+
+res_ELI_vs_SFI_Sig <- subset(res_ELI_vs_SFI, padj < 0.1)
+
+
+## ----echo=FALSE-------------------------------
+head(res_NIT_vs_ELI_Sig[ order(res_NIT_vs_ELI_Sig$log2FoldChange), ])
+
+head(res_NIT_vs_SFI_Sig[ order(res_NIT_vs_SFI_Sig$log2FoldChange), ])
+
+head(res_ELI_vs_SFI_Sig[ order(res_ELI_vs_SFI_Sig$log2FoldChange), ])
+
+
+## ----echo=FALSE-------------------------------
+head(res_NIT_vs_ELI_Sig[ order(res_NIT_vs_ELI_Sig$log2FoldChange, decreasing = TRUE), ])
+
+head(res_NIT_vs_SFI_Sig[ order(res_NIT_vs_SFI_Sig$log2FoldChange, decreasing = TRUE), ])
+
+head(res_ELI_vs_SFI_Sig[ order(res_ELI_vs_SFI_Sig$log2FoldChange, decreasing = TRUE), ])
+
+
+## ----include=FALSE----------------------------
+columns(org.Hs.eg.db)
+
+
+## ----echo=FALSE-------------------------------
+# NIT vs ELI Sig
+
+tmp_NIT_vs_ELI_Sig=gsub("\\..*","",row.names(res_NIT_vs_ELI_Sig)) # borrar '.' de ENSEMBL
+
+res_NIT_vs_ELI_Sig$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_ELI_Sig,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_ELI_Sig$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_ELI_Sig,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_ELI_Sig_Ordered <- res_NIT_vs_ELI_Sig[order(res_NIT_vs_ELI_Sig$pvalue),]
+
+head(res_NIT_vs_ELI_Sig_Ordered)
+
+# NIT vs SFI Sig
+
+tmp_NIT_vs_SFI_Sig=gsub("\\..*","",row.names(res_NIT_vs_SFI_Sig)) # borrar '.' de ENSEMBL
+
+res_NIT_vs_SFI_Sig$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_SFI_Sig,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_SFI_Sig$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_SFI_Sig,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_SFI_Sig_Ordered <- res_NIT_vs_SFI_Sig[order(res_NIT_vs_SFI_Sig$pvalue),]
+
+head(res_NIT_vs_SFI_Sig_Ordered)
+
+# ELI vs SFI Sig
+
+tmp_ELI_vs_SFI_Sig=gsub("\\..*","",row.names(res_ELI_vs_SFI_Sig)) # borrar '.' de ENSEMBL
+
+res_ELI_vs_SFI_Sig$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_ELI_vs_SFI_Sig,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_ELI_vs_SFI_Sig$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_ELI_vs_SFI_Sig,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_ELI_vs_SFI_Sig_Ordered <- res_ELI_vs_SFI_Sig[order(res_ELI_vs_SFI_Sig$pvalue),]
+
+head(res_ELI_vs_SFI_Sig_Ordered)
+
+
+## ----echo=FALSE-------------------------------
+# Para obtener las keys
+
+# NIT vs ELI
+
+tmp_NIT_vs_ELI=gsub("\\..*","",row.names(res_NIT_vs_ELI)) # borrar '.' de ENSEMBL
+
+res_NIT_vs_ELI$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_ELI,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_ELI$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_ELI,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_ELI_Ordered <- res_NIT_vs_ELI[order(res_NIT_vs_ELI$pvalue),]
+
+head(res_NIT_vs_ELI_Ordered)
+
+# NIT vs SFI
+
+res_NIT_vs_SFI_DF <- as.data.frame(res_NIT_vs_SFI)
+
+tmp_NIT_vs_SFI=gsub("\\..*","",row.names(res_NIT_vs_SFI)) # borrar '.' de ENSEMBL
+
+res_NIT_vs_SFI$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_SFI,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_SFI$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_NIT_vs_SFI,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_NIT_vs_SFI_Ordered <- res_NIT_vs_SFI[order(res_NIT_vs_SFI$pvalue),]
+
+head(res_NIT_vs_SFI_Ordered)
+
+# ELI vs SFI
+
+res_ELI_vs_SFI_DF <- as.data.frame(res_ELI_vs_SFI)
+
+tmp_ELI_vs_SFI=gsub("\\..*","",row.names(res_ELI_vs_SFI_DF)) # borrar '.' de ENSEMBL
+
+res_ELI_vs_SFI$symbol <- mapIds(org.Hs.eg.db,
+                     keys=tmp_ELI_vs_SFI,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_ELI_vs_SFI$entrez <- mapIds(org.Hs.eg.db,
+                     keys=tmp_ELI_vs_SFI,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res_ELI_vs_SFI_Ordered <- res_ELI_vs_SFI[order(res_ELI_vs_SFI$pvalue),]
+
+head(res_ELI_vs_SFI_Ordered)
+
+
+
+## ----Significativos, include=FALSE------------
+# Exportamos los resultados significativos
+
+# NIT_vs_ELI
+
+res_NIT_vs_ELI_Sig_Ordered_DF <- as.data.frame(res_NIT_vs_ELI_Sig_Ordered)
+
+write.csv(res_NIT_vs_ELI_Sig_Ordered, file = "./results/NIT_vs_ELI_Sig.csv")
+
+# NIT_vs_SFI
+
+res_NIT_vs_SFI_Sig_Ordered_DF <- as.data.frame(res_NIT_vs_SFI_Sig_Ordered)
+
+write.csv(res_NIT_vs_SFI_Sig_Ordered, file = "./results/NIT_vs_SFI_Sig.csv")
+
+# ELI_vs_SFI
+
+res_ELI_vs_SFI_Sig_Ordered_DF <- as.data.frame(res_ELI_vs_SFI_Sig_Ordered)
+
+write.csv(res_ELI_vs_SFI_Sig_Ordered, file = "./results/ELI_vs_SFI_Sig.csv")
+
+
+## ----include=FALSE----------------------------
+# Exportamos los resultados
+
+# NIT_vs_ELI
+
+res_NIT_vs_ELI_Ordered_DF <- as.data.frame(res_NIT_vs_ELI_Ordered)
+
+write.csv(res_NIT_vs_ELI_Ordered, file = "./results/NIT_vs_ELI.csv")
+
+# NIT_vs_SFI
+
+res_NIT_vs_SFI_Ordered_DF <- as.data.frame(res_NIT_vs_SFI_Ordered)
+
+write.csv(res_NIT_vs_SFI_Ordered, file = "./results/NIT_vs_SFI.csv")
+
+# ELI_vs_SFI
+
+res_ELI_vs_SFI_Ordered_DF <- as.data.frame(res_ELI_vs_SFI_Ordered)
+
+write.csv(res_ELI_vs_SFI_Ordered, file = "./results/ELI_vs_SFI.csv")
+
+
+
+## ----echo=FALSE-------------------------------
+# Combinamos las 3 comparaciones para el posterior Diagrama de Venn
+
+comb <- c(rownames(res_NIT_vs_ELI_Sig_Ordered_DF), rownames(res_NIT_vs_ELI_Sig_Ordered_DF), rownames(res_ELI_vs_SFI_Sig_Ordered_DF))
+
+res_NIT_vs_ELI_venn <- comb %in% rownames(res_NIT_vs_ELI_Sig_Ordered_DF)
+res_NIT_vs_SFI_venn <- comb %in% rownames(res_NIT_vs_ELI_Sig_Ordered_DF)  
+res_ELI_vs_SFI_venn <- comb %in% rownames(res_ELI_vs_SFI_Sig_Ordered_DF)
+
+counts_venn <- cbind(res_NIT_vs_ELI_venn, res_NIT_vs_SFI_venn, res_ELI_vs_SFI_venn)
+
+results_venn <- vennCounts(counts_venn)
+
+vennDiagram (results_venn, cex=1, names = c("NIT vs ELI", "NIT vs SFI", "ELI vs SFI"), circle.col = c("red", "blue", "yellow"))
+
+title("Genes en común en las 3 comparaciones")
+
+
+## ----echo=FALSE-------------------------------
+# Con el paquete 'ClusterProfiler'
+
+tmp_NIT_vs_ELI=gsub("\\..*","",row.names(res_NIT_vs_ELI_Ordered_DF)) # borrar '.' de ENSEMBL
+
+ego_NIT_vs_ELI <- enrichGO(gene         = res_NIT_vs_ELI_Ordered_DF$entrez,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENTREZID',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_NIT_vs_ELI))
+
+dotplot(ego_NIT_vs_ELI, showCategory = 15)
+
+
+## ----echo=FALSE-------------------------------
+ego_NIT_vs_ELI_Sig <- enrichGO(gene         = res_NIT_vs_ELI_Sig_Ordered_DF$entrez,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENTREZID',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_NIT_vs_ELI_Sig))
+
+dotplot(ego_NIT_vs_ELI_Sig, showCategory = 15)
+
+
+## ----echo=FALSE-------------------------------
+tmp_NIT_vs_SFI=gsub("\\..*","",row.names(res_NIT_vs_SFI_Ordered_DF)) # borrar '.' de ENSEMBL
+
+ego_NIT_vs_SFI <- enrichGO(gene         = res_NIT_vs_SFI_Ordered_DF$entrez,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENTREZID',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_NIT_vs_SFI))
+
+dotplot(ego_NIT_vs_SFI, showCategory = 15)
+
+
+## ----echo=FALSE-------------------------------
+ego_NIT_vs_SFI_Sig <- enrichGO(gene         = res_NIT_vs_SFI_Sig_Ordered_DF$entrez,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENTREZID',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_NIT_vs_SFI_Sig))
+
+dotplot(ego_NIT_vs_SFI_Sig, showCategory = 15)
+
+
+## ----echo=FALSE-------------------------------
+# En este caso utilizaremos como keyType 'ENSEMBL' en lugar de ENTREZID, para ver si hay diferencias.
+
+tmp_ELI_vs_SFI=gsub("\\..*","",row.names(res_ELI_vs_SFI_Ordered_DF)) # borrar '.' de ENSEMBL
+
+ego_ELI_vs_SFI <- enrichGO(gene         = tmp_ELI_vs_SFI,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENSEMBL',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_ELI_vs_SFI))
+
+dotplot(ego_ELI_vs_SFI, showCategory = 15)
+
+
+## ----echo=FALSE-------------------------------
+tmp_ELI_vs_SFI_Sig=gsub("\\..*","",row.names(res_ELI_vs_SFI_Sig_Ordered_DF)) # borrar '.' de ENSEMBL
+
+ego_ELI_vs_SFI_Sig <- enrichGO(gene         = tmp_ELI_vs_SFI_Sig,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'ENSEMBL',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego_ELI_vs_SFI_Sig))
+
+dotplot(ego_ELI_vs_SFI_Sig, showCategory = 15)
+
+
+## ----echo=FALSE-------------------------------
+
+listOfTables <- list(NIT_vs_ELI = res_NIT_vs_ELI_Sig_Ordered_DF,                    NIT_vs_SFI = res_NIT_vs_SFI_Sig_Ordered_DF, ELI_vs_SFI = res_ELI_vs_SFI_Sig_Ordered_DF)
+
+listOfSelected <- list()
+
+for (i in 1:length(listOfTables)){
+  
+  topTab <- listOfTables[[i]]
+  
+  whichGenes<-topTab$padj<0.1
+  selectedIDs <- gsub("\\..*","",row.names(topTab)[whichGenes])
+  EntrezIDs <- topTab$entrez
+  listOfSelected[[i]] <- EntrezIDs
+  names(listOfSelected)[i] <- names(listOfTables)[i]
+}
+
+sapply(listOfSelected, length)
+
+
+
+## ----include=FALSE----------------------------
+
+mapped_genes2GO <- mappedkeys(org.Hs.egGO)
+mapped_genes2KEGG <- mappedkeys(org.Hs.egPATH)
+mapped_genes <- union(mapped_genes2GO , mapped_genes2KEGG)
+
+
+
+## ----echo=FALSE-------------------------------
+
+library(clusterProfiler)
+
+
+listOfData <- listOfSelected[1:3]
+comparisonsNames <- names(listOfData)
+universe <- mapped_genes
+
+for (i in 1:length(listOfData)){
+  genesIn <- listOfData[[i]]
+  comparison <- comparisonsNames[i]
+  enrich.result <- enrichKEGG(gene = genesIn,
+                                 pvalueCutoff = 0.10,
+                                 pAdjustMethod = "BH",
+                                 organism = "human",
+                                 universe = universe)
+  cat("##################################")
+  cat("\nComparison: ", comparison,"\n")
+  print(head(enrich.result))
+  
+  if (length(rownames(enrich.result@result)) != 0) {
+    write.csv(as.data.frame(enrich.result), 
+              file =paste0("./results/","cluster.Results.",comparison,".csv"), 
+              row.names = FALSE)
+    
+    pdf(file=paste0("./results/","clusterBarplot.",comparison,".pdf"))
+    print(barplot(enrich.result, showCategory = 15, font.size = 4, 
+                  title = paste0("Cluster Pathway Analysis for ", comparison,". Barplot")))
+    dev.off()
+    
+    pdf(file = paste0("./results/","clustercnetplot.",comparison,".pdf"))
+    print(cnetplot(enrich.result, categorySize = "geneNum", schowCategory = 15, 
+                   vertex.label.cex = 0.75))
+    dev.off()
+  } 
+}
+
+
+
+## ----echo=FALSE-------------------------------
+tabla_NIT_vs_ELI <- read.csv2("./results/cluster.Results.NIT_vs_ELI.csv", header = TRUE, sep = ",") 
+
+knitr::kable(head(tabla_NIT_vs_ELI), booktabs = TRUE, caption = 'Tabla NIT_vs_ELI')
+
+
+## ----echo=FALSE-------------------------------
+tabla_NIT_vs_SFI <- read.csv2("./results/cluster.Results.NIT_vs_SFI.csv", header = TRUE, sep = ",") 
+
+knitr::kable(head(tabla_NIT_vs_SFI), booktabs = TRUE, caption = 'Tabla NIT_vs_SFI')
+
+
+## ----echo=FALSE-------------------------------
+tabla_ELI_vs_SFI <- read.csv2("./results/cluster.Results.ELI_vs_SFI.csv", header = TRUE, sep = ",") 
+
+knitr::kable(head(tabla_ELI_vs_SFI), booktabs = TRUE, caption = 'Tabla ELI_vs_SFI')
+
+
+## ----echo=FALSE-------------------------------
+knitr::include_graphics("./results/barplot_NIT_vs_ELI.png")
+
+knitr::include_graphics("./results/cnetplot_NIT_vs_ELI.png")
+
+
+
+## ----echo=FALSE-------------------------------
+knitr::include_graphics("./results/barplot_NIT_vs_SFI.png")
+
+knitr::include_graphics("./results/cnetplot_NIT_vs_SFI.png")
+
+
+
+## ----echo=FALSE-------------------------------
+knitr::include_graphics("./results/barplot_ELI_vs_SFI.png")
+
+knitr::include_graphics("./results/cnetplot_ELI_vs_SFI.png")
+
+
+
+```
+
+
+## Bibliografía
+
+(1) Yu, Guangchuang, and Qing-Yu He. 2016. “ReactomePA: An R/Bioconductor Package for Reactome Pathway Analysis and Visualization.” Molecular BioSystems 12 (2): 477–79. https://doi.org/10.1039/C5MB00663E.
+
+(2) Yu, Guangchuang, Li-Gen Wang, Guang-Rong Yan, and Qing-Yu He. 2015. “DOSE: An R/Bioconductor Package for Disease Ontology Semantic and Enrichment Analysis.” Bioinformatics 31 (4): 608–9. https://doi.org/10.1093/bioinformatics/btu684.
+
+(3) Yu, G., Wang, L. G., Han, Y., & He, Q. Y. (2012). clusterProfiler: an R package for comparing biological themes among gene clusters. Omics : a journal of integrative biology, 16(5), 284–287. https://doi.org/10.1089/omi.2011.0118
+
+
